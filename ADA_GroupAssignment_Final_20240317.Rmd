@@ -1,0 +1,600 @@
+---
+title: "ADA Groupwork Assignment"
+author: "2292213, 5528141, 5581250, 5582755, 5587165, 5588409, 5589718"
+date: "2024-03-08"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(readxl) # for importing a file
+library(Hmisc)
+library(cluster)
+library(factoextra)
+library(dplyr)
+library(psych)
+library(psychTools)
+library(GPArotation)
+library(plyr)
+library(caret)
+library(clValid)
+library(readxl)
+library(gridExtra)
+library(summarytools)
+library(mclust)
+```
+
+```{r import_data}
+# import loan data as df
+df <- read_excel("loan_data_ADA_assignment.xlsx")
+```
+
+```{r summary_data1}
+summary(df)
+```
+
+
+## **1. Define the Problem**
+### **1.1. Objective**
+* Utilising cluster analysisrouping borrowers with similar characteristics 
+* Identify distinct borrower's segments
+* Enabling personalised loan products, targeted marketing strategies, 
+  and a better customer support process to serve the unique needs of each segment
+
+### **1.2. Select cluster variables**
+1. annual_inc: The self-reported annual income provided by the borrower during registration.
+2. loan_amnt: The listed amount of the loan applied for by the borrower. 
+             If at some point in time, the credit department reduces the loan amount, then it will be reflected in this value.
+3. int_rate:	Interest Rate on the loan
+4. total_rec_int: Interest received to date
+5. total_rec_prncp: Principal received to date
+6. dti:	A ratio calculated using the borrower’s total monthly debt payments on the total debt obligations, 
+        excluding mortgage and the requested LC loan, divided by the borrower’s self-reported monthly income.
+7. total_rec_late_fee: Late fees received to date
+8. term : The entire period of the loan
+9. home_ownership: The home ownership status provided by the borrower during registration or obtained from the credit report. 
+                  Our values are: RENT, OWN, MORTGAGE, OTHER
+10. grade : The grade of loan
+
+```{r}
+# create new df with essential variables (10 variables)
+df_ess <- df %>% select(annual_inc,
+                        loan_amnt,
+                        int_rate,
+                        total_rec_int,
+                        total_rec_prncp,
+                        dti,
+                        total_rec_late_fee,
+                        term,
+                        home_ownership,
+                        grade)
+```
+
+## **2. Pre-Analysis Decision**
+### **2.1. Data checking (duplicate, missing values, outliers)**
+
+* Check duplicate value
+```{r}
+# total row of data 
+df_row <- nrow(df_ess)
+
+# distinct data
+unique_row <- nrow(distinct(df_ess))
+
+# verification. No duplicated data
+duplicated <- df_row - unique_row
+print(duplicated)
+```
+
+* Check missing value
+```{r}
+missing_counts <- numeric(length(df_ess))
+
+for (col in names(df_ess)) {
+  missing_counts[col] <- sum(is.na(df_ess[[col]]))
+}
+
+missing_counts
+```
+No missing value in cluster variables.
+
+* Detect outliers using graphical method
+```{r echo = TRUE, warning = FALSE, message = FALSE}
+df_summary <- dfSummary(df_ess)
+filename <- "df_summary.html"
+view(df_summary, file = filename)
+```
+
+```{r}
+summary(df_ess)
+```
+
+### **2.2. Data encoding**
+1) Home-ownership: recode to metric variables - sequence order by financial stability (1-highest, 5-lowest)
+1. OWN -1
+2. MORTGAGE-2
+3. RENT -3
+4. OTHER-4
+5. NONE-5
+
+2) grade : 1 - 7 (A - G) 
+1: Highest (A)
+7: Lowest (G)
+
+3) Term: 
+0 -> 36 (short-term)
+1 -> 60 (long-term)
+
+```{r}
+# Change into factor
+df_ess$home_ownership <- as.factor(df_ess$home_ownership)
+df_ess$grade <- as.factor(df_ess$grade)
+df_ess$term <- as.factor(df_ess$term)
+
+# Recode
+df_ess$home_ownership <- revalue(df_ess$home_ownership, 
+                                       c('OWN' = 1, 'MORTGAGE' = 2, 'RENT' = 3, 'OTHER' = 4, 'NONE' = 5))
+
+
+df_ess$grade <- revalue(df_ess$grade, 
+                             c('A' = 1, 'B' = 2, 'C' = 3, 'D' = 4, 'E' = 5, 'F' = 6, 'G' = 7))
+
+df_ess$term <- revalue(df_ess$term,
+                            c('36' = 0, '60' = 1))
+```
+
+```{r}
+summary(df_ess)
+```
+
+```{r}
+# Convert all selected columns to numeric
+loanDataFiltered <- apply(df_ess, 2, as.numeric)
+loanDataFiltered_df <- as.data.frame(loanDataFiltered)
+summary(loanDataFiltered_df)
+```
+
+### **2.3. Sampling**
+```{r}
+set.seed(10)
+sample <- sample_n(loanDataFiltered_df, 500)
+```
+
+## **3. Check Assumptions**
+
+### **3.1. Data checking**
+```{r}
+# Distribution of loan amount of sample vs population                        
+grid.arrange(ggplot(sample, aes(x = loan_amnt)) + geom_histogram(binwidth = 1000),
+                         ggplot(df_ess, aes(x = loan_amnt)) + geom_histogram(binwidth = 1000),
+                         ncol = 2)
+
+# Scatter plot of interest rate and loan amount based on home ownership
+grid.arrange(ggplot(sample, aes(x = loan_amnt, y = int_rate, color = home_ownership)) + 
+                          geom_point(position = "jitter", alpha = 0.4), 
+                        ggplot(df_ess, aes(x = loan_amnt, y = int_rate, color = home_ownership)) + 
+                          geom_point(position = "jitter", alpha = 0.4),
+                        ncol = 2)
+```
+
+### **3.2. Multicollinearity: Pairwise Correlation**
+```{r}
+sampleMatrix<-cor(sample)
+```
+
+```{r}
+# round(sampleMatrix, 2)
+```
+
+```{r}
+lowerCor(sample)
+```
+
+### **3.3. Multicollinearity: Kaiser-Meyer-Olkin (KMO)**
+```{r}
+KMO(sample)
+```
+
+Kaiser-Meyer-Olkin (KMO) test is a standard to assess the suitability of a data set for factor analysis. We are looking for a KMO value of 0.5 or more. Here it is 0.71, so this is good.
+
+### **3.4. Multicollinearity: Bartlett's test**
+```{r}
+cortest.bartlett(sample)
+```
+P-value is 0, which means there is a sufficient correlation between variables. We can use factor analysis in this case.
+
+## **4. Perform Principal Component Analysis (PCA)**
+
+```{r}
+pcModel<-principal(sample, 5, rotate="none", weights=TRUE, scores=TRUE)
+print(pcModel)
+```
+```{r}
+print.psych(pcModel, cut=0.3, sort=TRUE)
+```
+
+To produce the scree plot
+```{r}
+plot(pcModel$values,type="b")
+```
+
+```{r}
+pcModel$weights
+```
+
+We can then access these scores by using 
+```{r}
+head(pcModel$scores, 10)
+```
+
+We can use the principal component scores for further analysis, before doing that we need to add them into our dataframe:
+```{r}
+sample_pca <- cbind(sample, pcModel$scores)
+```
+
+```{r}
+summary(sample_pca)
+```
+
+
+## **5. Perform Factor Analysis **
+
+Two Factors Solution with Orthogonal rotation (Varimax Rotation)
+```{r}
+fa3v<-(fa(sample,2, n.obs=500, rotate="varimax", fm="pa"))
+print.psych(fa3v, cut=0.3,sort="TRUE")
+fa.diagram(fa3v)
+```
+
+Once we have decided best solution, we can set scores to regression. 
+```{r}
+fa3v<-(fa(sample,2, n.obs=500, rotate="varimax", fm="pa", scores="regression"))
+head(fa3v$scores, 10)
+```
+
+We can use the factor scores for further analysis, before doing that we need to add them into our dataframe:
+```{r}
+sample_fa3 <- fa3v$scores
+```
+
+```{r}
+summary(sample_fa3)
+```
+
+
+## **6. Create Clusters**
+
+1) Check outliers again after selecting 3 factors
+
+* Calculate Mahalanobis distance to identify potential outliers
+```{r}
+Maha <- mahalanobis(sample_fa3,colMeans(sample_fa3),cov(sample_fa3))
+```
+
+```{r}
+MahaPvalue <-pchisq(Maha,df=10,lower.tail = FALSE)
+# print(MahaPvalue)
+print(sum(MahaPvalue<0.001)) # no outlier
+```
+
+
+2) Check multicollinearity again after selecting 3 factors
+
+```{r}
+SampleMatrix<-cor(sample_fa3)
+```
+
+```{r}
+#round(sample_fa3, 2)
+```
+
+```{r}
+lowerCor(sample_fa3)
+```
+There is no substantial number of correlations > 0.3
+
+### **6.1. Standardise/normalise data**
+
+```{r}
+# Standardize data set
+sample_s <- scale(sample_fa3)
+
+# View the standardized data
+head(sample_s)
+```
+
+### **6.2. Select clustering method**
+* **Find the Linkage Method to Use**
+
+* Define linkage methods
+```{r}
+m <- c( "average", "single", "complete", "ward")
+names(m) <- c( "average", "single", "complete", "ward")
+```
+
+* Function to compute agglomerative coefficient
+```{r}
+ac <- function(x) {
+  agnes(sample_s, method = x)$ac
+}
+```
+
+* Calculate agglomerative coefficient for each clustering linkage method
+```{r}
+sapply(m, ac)
+```
+
+* Calculate gap statistic for each number of clusters (up to 10 clusters)
+```{r}
+gap_stat_h_fa3 <- clusGap(sample_s, FUN = hcut, nstart = 25, K.max = 10, B = 50)
+gap_stat_k_fa3 <- clusGap(sample_s, FUN = kmeans, nstart = 25, K.max = 10, B = 50)
+```
+
+* Produce plot of optimal number of clusters using gap statistic method
+```{r}
+fviz_gap_stat(gap_stat_h_fa3) # 3 clusters for hierarchical
+fviz_gap_stat(gap_stat_k_fa3) # 3 clusters for Non-hierarchical (Kmeans)
+```
+
+* Finding distance matrix
+```{r}
+#using Euclidean distance
+distance_mat_fa3 <- dist(sample_s, method = 'euclidean')
+```
+
+## **7. Comparing results & choosing solution**
+* **Hierarchical clustering Model**
+
+* Fitting Hierarchical clustering Model to dataset
+```{r}
+set.seed(240)  # Setting seed
+Hierar_cl_fa3 <- hclust(distance_mat_fa3, method = "ward.D")
+Hierar_cl_fa3
+```
+
+* Plotting dendrogram
+```{r}
+plot(Hierar_cl_fa3)
+```
+
+* Choosing no. of clusters: 3 clusters
+```{r}
+fit_fa3 <- cutree(Hierar_cl_fa3, k = 3)
+fit_fa3
+```
+
+* Find number of observations in each cluster
+```{r}
+table(fit_fa3)
+```
+
+```{r}
+final_data_fa3 <-cbind(sample_s, cluster = fit_fa3)
+```
+
+
+* Display first six rows of final data
+```{r}
+head(final_data_fa3)
+```
+
+* Find mean values for each cluster
+```{r}
+hcentres_fa3<-aggregate(x=final_data_fa3, by=list(cluster=fit_fa3), FUN="mean")
+print(hcentres_fa3)
+```
+
+
+
+* **Non-hierarchical clustering Model (Kmeans)**
+
+```{r}
+# 3 clusters
+set.seed(55)
+k_cl_fa3 <- kmeans(sample_s, 3, nstart=25)
+k_cl_fa3 
+```
+
+* **Choose final cluster solution**
+
+**Similarity measure**
+
+* Using Silhouette Coefficient Index to compare hierarchical and Non-hierarchical solutions
+
+```{r}
+# Hierarchical model 
+silhouette_score_hierar <- silhouette(fit_fa3, dist(sample_s))
+avg_sil_width_hierar <- mean(silhouette_score_hierar[, 'sil_width'])
+
+# Non-hierarchical model  (K-means)
+silhouette_score_kmeans <- silhouette(k_cl_fa3$cluster, dist(sample_s))
+avg_sil_width_kmeans <- mean(silhouette_score_kmeans[, 'sil_width'])
+
+# Compare Silhouette Coefficient Index
+print(paste("Hierarchical clustering average silhouette width:", avg_sil_width_hierar))
+print(paste("K-means clustering average silhouette width:", avg_sil_width_kmeans))
+
+```
+
+Based on the result above, non-hierarchical model has a higher Silhouette Coefficient Index, which means clusters are closely connected within each other, while clusters are relatively separated from each other.
+
+
+```{r}
+# Silhouette plot
+fviz_silhouette(silhouette_score_hierar) + 
+    ggtitle(paste("Hierarchical Clustering Model Silhouette Plot\nAverage silhouette width:", round(avg_sil_width_hierar, 3)))
+
+fviz_silhouette(silhouette_score_kmeans) + 
+    ggtitle(paste("K-means Clustering Model Silhouette Plot\nAverage silhouette width:", round(avg_sil_width_kmeans, 3)))
+```
+
+According to these two figures, the K-means clustering model provides better clustering quality, with higher average silhouette width and more consistent intra-group similarity. In hierarchical clustering model, it can be seen that many samples, in cluster 1 and 2, have a negative silhouette coefficient. This means that they are not in the right cluster. 
+
+Hence, we choose to use K-means clustering (3 clusters) solution in our case.
+
+
+## **8. Validate & Profile cluster solution**
+### **8.1. Stability check**
+
+1) Using Silhouette Coefficient Index again to test internal new cluster (subset)
+```{r}
+#Save the initial cluster results
+initial_cluster <- k_cl_fa3$cluster
+
+set.seed(55)  # Ensure reproducibility
+indices <- sample(1:nrow(sample_s), size = 100)  # Random indices for the subset
+subset <- sample_s[indices, ]  # Extract the subset
+new_cluster <- kmeans(subset, 3, nstart = 25)  # Perform KMeans clustering on the subset
+```
+
+
+```{r}
+silhouette_score_new_cluster <- silhouette(new_cluster$cluster, dist(subset))
+avg_sil_width_new_cluster <- mean(silhouette_score_new_cluster[, 'sil_width'])
+```
+
+
+```{r}
+print(paste("New clustering average silhouette width:", avg_sil_width_new_cluster))
+```
+
+- Silhouette plot
+```{r}
+fviz_silhouette(silhouette_score_kmeans) + 
+    ggtitle(paste("New Clustering Model Silhouette Plot\nAverage silhouette width:", round(avg_sil_width_new_cluster, 3)))
+```
+
+2) Choosing different sample
+Sample size: 500 (given)
+No explicit pattern detected from the previous section. Therefore, random sampling will be used to sample 500.
+```{r}
+set.seed(1)
+sample_2 <- sample_n(loanDataFiltered_df, 500)
+```
+
+3) Performing Factor Analysis to new sample
+Two Factors Solution with Orthogonal rotation (Varimax Rotation)
+```{r}
+fa3v_2<-(fa(sample_2,2, n.obs=500, rotate="varimax", fm="pa"))
+print.psych(fa3v_2, cut=0.3,sort="TRUE")
+fa.diagram(fa3v_2)
+```
+
+Once we have decided best solution, we can set scores to regression. 
+```{r}
+fa3v_2<-(fa(sample_2,2, n.obs=500, rotate="varimax", fm="pa", scores="regression"))
+head(fa3v_2$scores, 10)
+```
+
+We can use the factor scores for further analysis, before doing that we need to add them into our dataframe:
+```{r}
+sample_fa3_2 <- fa3v_2$scores
+```
+
+4) Create clusters
+- Standardize data 
+```{r}
+# Standardise data set
+sample_fa3_s_2 <- scale(sample_fa3_2)
+
+# View the standardized data
+head(sample_fa3_s_2)
+```
+
+* **Find the Linkage Method to Use**
+
+* Define linkage methods
+```{r}
+m <- c( "average", "single", "complete", "ward")
+names(m) <- c( "average", "single", "complete", "ward")
+```
+
+- Function to compute agglomerative coefficient
+```{r}
+ac <- function(x) {
+  agnes(sample_fa3_s_2, method = x)$ac
+}
+```
+
+- Calculate agglomerative coefficient for each clustering linkage method
+```{r}
+sapply(m, ac)
+```
+
+- Calculate gap statistic for each number of clusters (up to 10 clusters)
+```{r}
+gap_stat_k_fa3_2 <- clusGap(sample_fa3_s_2, FUN = kmeans, nstart = 25, K.max = 10, B = 50)
+```
+
+- Produce plot of potential number of clusters using gap statistic method
+```{r}
+fviz_gap_stat(gap_stat_k_fa3_2) # 5 clusters for Non-hierarchical (Kmeans)
+```
+
+- Finding distance matrix
+```{r}
+#using Euclidean distance
+distance_mat_fa3_2 <- dist(sample_fa3_s_2, method = 'euclidean')
+```
+
+
+```{r}
+# 5 clusters
+#(between_SS / total_SS =  73.6 %) 
+set.seed(55)
+k_cl_fa3_2 <- kmeans(sample_fa3_s_2, 5, nstart=25)
+k_cl_fa3_2 
+k_cl_fa3
+```
+
+- Compare two clusters using Adjusted Rand Index (ARI)
+```{r ari}
+# ARI
+adjustedRandIndex(k_cl_fa3$cluster, k_cl_fa3_2$cluster)
+```
+
+### **8.2. Cluster segmentation**
+**Cluster plot**
+```{r}
+# Plot the result of CA for the initial sample
+fviz_cluster(k_cl_fa3, data = sample_s, 
+                         palette = c("#2E9FDF", "#00AFBB", "#E7B800", "red", "green", "purple", "grey", "orange"), 
+                         geom = "point", 
+                         ellipse.type = "convex", 
+                         ggtheme= theme_bw())
+```
+
+**Cluster characteristics**
+
+From the cluster plot above, we have 3 clusters for the initial sample with the following characteristics:
+
+* Cluster 1: representing customers with higher creditworthiness, as it correlates with variables like interest rate, grade, and term, which are typically better for customers with good credit.
+* Cluster 2: Customers in this cluster could have lower credit scores but relatively higher current financial activities or responsibilities.
+* Cluster 3: representing customers with lower creditworthiness and less active or lower financial status.
+
+**Recommendation**
+
+Based on the clustering outcomes, here are some recommendations for the loan company tailored to each customer cluster:
+
+* **Cluster 1 (Higher Creditworthiness):**
+1. Premium Services: To retain low-risk customers, offer high-quality loan options with attractive interest rates and adjustable repayment terms.
+2. Loyalty Programs: Encourage customer loyalty by implementing loyalty programs or offering incentives to retain their business and encourage referrals.
+3. Credit Line Increases: Consider offering higher credit lines or larger loans based on the excellent credit standing of such customers.
+4. Cross-Selling Opportunities: Given their probable financial stability, target these customers by cross-selling other financial products, such as investment opportunities or insurance.
+
+* **Cluster 2 (Lower Credit Scores, Higher Financial Activity):**
+1. Financial Planning Services: Provide financial planning services to help these customers manage their finances and improve their credit scores.
+2. Credit Education: To aid these customers in improving their credit scores over time, offer credit counseling or educational resources.
+3. Monitoring and Alerts: Introduce monitoring services that notify customers of possible credit issues or opportunities to improve their credit status.
+
+* **Cluster 3 (Lower Creditworthiness and Financial Status):**
+1. Secured Loan Options: Offer secured loans that require collateral, which can help mitigate risk while providing these customers access to credit.
+2. Credit Building Products: Create products aimed at helping customers build or rebuild their credit, such as secured credit cards or small credit-builder loans.
+3. Risk-Adjusted Pricing: Use risk-adjusted pricing models to ensure that the interest rates and fees compensate for the higher risk associated with this group.
+4. Financial Assistance Programs: Implement hardship programs or financial assistance to support customers who may struggle with repayments.
+
+By tailoring our approach to each customer segment, the lending company can more effectively manage risk, maximise profitability, and enhance customer satisfaction.
